@@ -1,20 +1,20 @@
 # Lighter Starter Kit - iOS + Mac App using SwiftUI
 
-This comes with- 
-- 1/ Login using Apple and Google using Supabase
-- 2/ Widget which you can customise
-- 3/ Revenue Cat Payments
-- 4/ App Lock in-built (FACE ID & PIN)
-- 5/ Navigation Stack to extend more than one View
-- 6/ Theme manager to manually manage theme
-
-## Screenshots
+## How it looks?
 
 | Sign-in | Onboarding page | Profile Page |
 |---------|-----------------|--------------|
 | <img width="312" height="681" alt="Screenshot 2025-11-30 at 15 38 49" src="https://github.com/user-attachments/assets/612f2370-febf-4f7a-9481-976c0462c0ff" /> | <img width="312" height="681" alt="Screenshot 2025-11-30 at 15 35 34" src="https://github.com/user-attachments/assets/2d64a731-8587-42e5-9239-80fb46948ec5" /> | <img width="312" height="681" alt="Screenshot 2025-11-30 at 15 36 52" src="https://github.com/user-attachments/assets/18a937dc-cf33-4f73-bbba-f258b856b63c" /> |
 
 ---
+
+## This comes with- 
+- 1/ Login using Apple and Google using Supabase
+- 2/ Widget which you can customise
+- 3/ Revenue Cat Payments
+- 4/ App Lock in-built (FACE ID & PIN)
+- 5/ Navigation Stack to extend more than one View
+- 6/ Theme manager to manually manage theme
 
 ## Project Overview: Follow this guide step-by-step
 
