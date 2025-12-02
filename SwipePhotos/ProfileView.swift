@@ -23,6 +23,11 @@ struct ProfileView: View {
     @State private var securityAlertMessage = ""
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var isUploadingPhoto = false
+    @State private var profileImageURL: URL?
+    @State private var selectedImage: UIImage?
+    @State private var showImageCropper = false
+    @State private var isLoadingImage = false
+    @State private var showFullScreenImage = false
 
     var body: some View {
         NavigationStack {
@@ -34,18 +39,53 @@ struct ProfileView: View {
                 } else {
                     // Profile Image
                     ZStack(alignment: .bottomTrailing) {
-                        if let imageUrl = profile?.profileImageUrl, !imageUrl.isEmpty {
-                            AsyncImage(url: URL(string: imageUrl)) { image in
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            } placeholder: {
-                                Image(systemName: "person.circle.fill")
-                                    .resizable()
-                                    .foregroundColor(.gray)
+                        if let url = profileImageURL {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .empty:
+                                    ProgressView()
+                                        .frame(width: 120, height: 120)
+                                case .success(let image):
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color(.systemGray6))
+                                            .frame(width: 120, height: 120)
+
+                                        image
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fill)
+                                            .frame(width: 120, height: 120)
+                                            .clipShape(Circle())
+                                    }
+                                    .onTapGesture {
+                                        showFullScreenImage = true
+                                    }
+                                case .failure(let error):
+                                    VStack(spacing: 4) {
+                                        Image(systemName: "person.circle.fill")
+                                            .resizable()
+                                            .foregroundColor(.gray)
+                                            .frame(width: 120, height: 120)
+                                        Text("Tap to retry")
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                    }
+                                    .onTapGesture {
+                                        // Force refresh profile
+                                        Task {
+                                            print("Image load failed for URL: \(url)")
+                                            print("Error: \(error)")
+                                            await loadProfileImage()
+                                        }
+                                    }
+                                @unknown default:
+                                    Image(systemName: "person.circle.fill")
+                                        .resizable()
+                                        .foregroundColor(.gray)
+                                        .frame(width: 120, height: 120)
+                                }
                             }
-                            .frame(width: 120, height: 120)
-                            .clipShape(Circle())
+                            .id(url) // Force reload when URL changes
                         } else {
                             // Placeholder for profile image
                             Image(systemName: "person.circle.fill")
@@ -65,10 +105,10 @@ struct ProfileView: View {
                                     .font(.system(size: 16, weight: .semibold))
                             }
                         }
-                        .disabled(isUploadingPhoto)
+                        .disabled(isUploadingPhoto || isLoadingImage)
                         .offset(x: -5, y: -5)
 
-                        if isUploadingPhoto {
+                        if isUploadingPhoto || isLoadingImage {
                             ZStack {
                                 Circle()
                                     .fill(Color.blue)
@@ -83,7 +123,7 @@ struct ProfileView: View {
                     }
                     .onChange(of: selectedPhotoItem) { oldValue, newValue in
                         Task {
-                            await uploadProfilePhoto()
+                            await loadSelectedImage()
                         }
                     }
 
@@ -301,13 +341,40 @@ struct ProfileView: View {
             .navigationTitle("Profile")
             .task {
                 await fetchProfile()
+                await loadProfileImage()
             }
             .refreshable {
                 await fetchProfile()
+                await loadProfileImage()
             }
             .onAppear {
                 Task {
                     await fetchProfile()
+                    await loadProfileImage()
+                }
+            }
+            .onChange(of: profile?.profileImageUrl) { oldValue, newValue in
+                Task {
+                    await loadProfileImage()
+                }
+            }
+            .fullScreenCover(isPresented: $showFullScreenImage) {
+                if let url = profileImageURL {
+                    FullScreenImageView(imageURL: url)
+                }
+            }
+            .sheet(isPresented: $showImageCropper) {
+                if let image = selectedImage {
+                    ImageCropperView(image: image) { croppedImage in
+                        Task {
+                            await uploadProfilePhoto(image: croppedImage)
+                        }
+                        showImageCropper = false
+                    } onCancel: {
+                        selectedPhotoItem = nil
+                        selectedImage = nil
+                        showImageCropper = false
+                    }
                 }
             }
             .sheet(isPresented: $showPINSetup) {
@@ -475,9 +542,7 @@ struct ProfileView: View {
 
     // MARK: - Profile Photo Upload
 
-    func uploadProfilePhoto() async {
-        guard let photoItem = selectedPhotoItem else { return }
-
+    func uploadProfilePhoto(image: UIImage) async {
         isUploadingPhoto = true
         errorMessage = nil
 
@@ -485,20 +550,23 @@ struct ProfileView: View {
             // Get the current user
             let user = try await supabase.auth.user()
 
-            // Load the image data
-            guard let imageData = try await photoItem.loadTransferable(type: Data.self) else {
-                errorMessage = "Failed to load image"
+            // Check if there's an old Supabase image to delete later
+            var oldImagePath: String?
+            if let currentImageUrl = profile?.profileImageUrl {
+                oldImagePath = extractStoragePath(from: currentImageUrl)
+                if let path = oldImagePath {
+                    print("🗑️ Old image found (will delete after upload): \(path)")
+                }
+            }
+
+            // Compress the image to approximately 300KB
+            guard let compressedData = compressImage(image, maxSizeKB: 300) else {
+                errorMessage = "Failed to compress image"
                 isUploadingPhoto = false
                 return
             }
 
-            // Compress the image if needed
-            guard let image = UIImage(data: imageData),
-                  let compressedData = image.jpegData(compressionQuality: 0.8) else {
-                errorMessage = "Failed to process image"
-                isUploadingPhoto = false
-                return
-            }
+            print("📦 Compressed image size: \(compressedData.count / 1024)KB")
 
             // Create a unique filename
             let fileName = "\(user.id.uuidString)/profile_\(UUID().uuidString).jpg"
@@ -516,22 +584,46 @@ struct ProfileView: View {
                     )
                 )
 
-            // Get the public URL
+            // Get the public URL structure (we'll use this to store in DB)
             let publicURL = try supabase.storage
                 .from("profile-images")
                 .getPublicURL(path: fileName)
 
-            // Update profile in database
+            print("✅ Image uploaded successfully")
+            print("📁 File path: \(fileName)")
+            print("📸 Storage URL: \(publicURL.absoluteString)")
+
+            // Store the URL in database (will be converted to signed URL on load)
             try await supabase
                 .from("profiles")
                 .update(["profile_image_url": publicURL.absoluteString])
                 .eq("id", value: user.id.uuidString)
                 .execute()
 
+            print("✅ Database updated with image URL")
+
             // Update local profile
             var updatedProfile = profile
             updatedProfile?.profileImageUrl = publicURL.absoluteString
             profile = updatedProfile
+
+            print("✅ Profile updated locally")
+
+            // Delete old image from storage if it was a Supabase image
+            if let oldPath = oldImagePath {
+                do {
+                    try await supabase.storage
+                        .from("profile-images")
+                        .remove(paths: [oldPath])
+                    print("🗑️ Old image deleted: \(oldPath)")
+                } catch {
+                    // Don't fail the upload if deletion fails
+                    print("⚠️ Failed to delete old image: \(error.localizedDescription)")
+                }
+            }
+
+            // This will trigger loadProfileImage via onChange
+            // which will generate a fresh signed URL
 
             selectedPhotoItem = nil
 
@@ -541,5 +633,117 @@ struct ProfileView: View {
         }
 
         isUploadingPhoto = false
+    }
+
+    // MARK: - Helper Functions
+
+    /// Load the selected image from PhotosPicker
+    func loadSelectedImage() async {
+        guard let photoItem = selectedPhotoItem else { return }
+
+        isLoadingImage = true
+
+        do {
+            guard let imageData = try await photoItem.loadTransferable(type: Data.self),
+                  let image = UIImage(data: imageData) else {
+                errorMessage = "Failed to load image"
+                isLoadingImage = false
+                return
+            }
+
+            selectedImage = image
+            isLoadingImage = false
+            showImageCropper = true
+        } catch {
+            errorMessage = "Failed to load image: \(error.localizedDescription)"
+            print("Image load error: \(error)")
+            isLoadingImage = false
+        }
+    }
+
+    /// Compress image to approximately maxSizeKB
+    func compressImage(_ image: UIImage, maxSizeKB: Int) -> Data? {
+        let maxBytes = maxSizeKB * 1024
+        var compression: CGFloat = 0.9
+        var imageData = image.jpegData(compressionQuality: compression)
+
+        // Iteratively reduce quality until we're under the target size
+        while let data = imageData, data.count > maxBytes && compression > 0.1 {
+            compression -= 0.1
+            imageData = image.jpegData(compressionQuality: compression)
+        }
+
+        // If still too large, resize the image
+        if let data = imageData, data.count > maxBytes {
+            let ratio = sqrt(CGFloat(maxBytes) / CGFloat(data.count))
+            let newSize = CGSize(width: image.size.width * ratio, height: image.size.height * ratio)
+
+            UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+            let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
+            UIGraphicsEndImageContext()
+
+            imageData = resizedImage?.jpegData(compressionQuality: 0.9)
+        }
+
+        return imageData
+    }
+
+    /// Extracts the storage path from a Supabase storage URL
+    /// Example: "https://mkdbuzyxlvwofvgzhvpj.supabase.co/storage/v1/object/public/profile-images/user-id/file.jpg"
+    /// Returns: "user-id/file.jpg"
+    func extractStoragePath(from urlString: String) -> String? {
+        // Check if it's a Supabase storage URL
+        guard urlString.contains("supabase.co/storage/v1/object") else {
+            return nil
+        }
+
+        // Extract the path after /profile-images/
+        if let range = urlString.range(of: "/profile-images/") {
+            let pathStart = range.upperBound
+            let remainingString = String(urlString[pathStart...])
+
+            // Remove query parameters if any
+            if let queryIndex = remainingString.firstIndex(of: "?") {
+                return String(remainingString[..<queryIndex])
+            }
+
+            return remainingString
+        }
+
+        return nil
+    }
+
+    /// Loads the profile image, generating a signed URL if it's a Supabase storage URL
+    func loadProfileImage() async {
+        guard let imageUrlString = profile?.profileImageUrl, !imageUrlString.isEmpty else {
+            print("⚠️ No profile image URL found")
+            profileImageURL = nil
+            return
+        }
+
+        print("🔍 Loading image from: \(imageUrlString)")
+
+        // Check if it's a Supabase storage URL
+        if let storagePath = extractStoragePath(from: imageUrlString) {
+            // It's a Supabase URL - generate a fresh signed URL
+            print("🔐 Detected Supabase URL, extracting path: \(storagePath)")
+            do {
+                let signedURL = try await supabase.storage
+                    .from("profile-images")
+                    .createSignedURL(path: storagePath, expiresIn: 3600) // 1 hour
+
+                profileImageURL = signedURL
+                print("✅ Generated signed URL: \(signedURL.absoluteString)")
+            } catch {
+                print("❌ Failed to generate signed URL: \(error)")
+                print("❌ Error details: \(error.localizedDescription)")
+                profileImageURL = nil
+            }
+        } else {
+            // It's a regular public URL - use it directly
+            profileImageURL = URL(string: imageUrlString)
+            print("📸 Using public URL directly: \(imageUrlString)")
+        }
     }
 }
