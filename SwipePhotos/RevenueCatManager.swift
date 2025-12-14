@@ -30,7 +30,6 @@ class RevenueCatManager: NSObject, ObservableObject {
     func setupWithUserID(_ userID: String) async {
         // Set the user ID so RevenueCat knows who this is
         Purchases.shared.logIn(userID) { customerInfo, _, error in
-            print("RevenueCat user set to: \(userID)")
             if let error = error {
                 print("Error setting RevenueCat user: \(error.localizedDescription)")
             }
@@ -48,8 +47,6 @@ class RevenueCatManager: NSObject, ObservableObject {
             let customerInfo = try await Purchases.shared.customerInfo()
             self.customerInfo = customerInfo
             
-            // Debug: Print all available entitlements
-            print("🔍 Available entitlements:")
             for (key, entitlement) in customerInfo.entitlements.all {
                 print("  - \(key): active=\(entitlement.isActive)")
             }
@@ -58,11 +55,7 @@ class RevenueCatManager: NSObject, ObservableObject {
             self.isSubscribed = customerInfo.entitlements[entitlementID]?.isActive == true
             errorMessage = nil
             
-            print("✅ Subscription status checked: \(isSubscribed)")
-            print("Looking for entitlement: \(entitlementID)")
-            
         } catch {
-            print("❌ Error checking subscription: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             isSubscribed = false
         }
@@ -75,15 +68,8 @@ class RevenueCatManager: NSObject, ObservableObject {
             let offerings = try await Purchases.shared.offerings()
             self.offerings = offerings
             self.currentOffering = offerings.current
-            
-            print("✅ Offerings loaded")
-            if let current = offerings.current {
-                print("Current offering: \(current.identifier)")
-                print("Available packages: \(current.availablePackages.count)")
-            }
-            
+
         } catch {
-            print("❌ Error loading offerings: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
         }
     }
@@ -95,17 +81,14 @@ class RevenueCatManager: NSObject, ObservableObject {
             let result = try await Purchases.shared.purchase(package: package)
             
             if !result.userCancelled {
-                print("✅ Purchase successful!")
                 await checkSubscriptionStatus()
                 isLoading = false
                 return true
             } else {
-                print("User cancelled purchase")
                 isLoading = false
                 return false
             }
         } catch {
-            print("❌ Purchase failed: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             isLoading = false
             return false
@@ -119,12 +102,9 @@ class RevenueCatManager: NSObject, ObservableObject {
             let customerInfo = try await Purchases.shared.restorePurchases()
             self.customerInfo = customerInfo
             self.isSubscribed = customerInfo.entitlements[entitlementID]?.isActive == true
-            
-            print("✅ Purchases restored")
             errorMessage = nil
             
         } catch {
-            print("❌ Error restoring purchases: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
         }
         isLoading = false
@@ -138,10 +118,38 @@ class RevenueCatManager: NSObject, ObservableObject {
             self.customerInfo = nil
             self.offerings = nil
             self.currentOffering = nil
-            print("✅ RevenueCat user logged out")
         } catch {
-            print("❌ Error logging out: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Delete User
+    /// Deletes the user's data from RevenueCat
+    /// This anonymizes the user by logging them out
+    /// For complete data deletion, you need to call RevenueCat's REST API from your backend
+    func deleteUser(appUserID: String) async throws {
+        // RevenueCat doesn't expose a deleteCustomer() method in the SDK
+        // For security reasons, customer deletion should be done via:
+        // 1. Your backend calling RevenueCat's REST API with your Secret API Key
+        // 2. Or manually through the RevenueCat dashboard
+
+        // For now, we log out the user which anonymizes them
+        do {
+            // Log out the user (this anonymizes them in RevenueCat)
+            _ = try await Purchases.shared.logOut()
+
+            // Clear local state
+            self.isSubscribed = false
+            self.customerInfo = nil
+            self.offerings = nil
+            self.currentOffering = nil
+
+            print("✓ User logged out from RevenueCat (anonymized)")
+            print("ℹ️ For complete GDPR deletion, call RevenueCat REST API: DELETE /v1/subscribers/\(appUserID)")
+
+        } catch {
+            errorMessage = error.localizedDescription
+            throw error
         }
     }
 }
@@ -152,16 +160,7 @@ extension RevenueCatManager: PurchasesDelegate {
     nonisolated func purchases(_ purchases: Purchases, receivedUpdated customerInfo: CustomerInfo) {
         Task { @MainActor in
             self.customerInfo = customerInfo
-            
-            // Debug: Print all available entitlements
-            print("🔄 Delegate - Available entitlements:")
-            for (key, entitlement) in customerInfo.entitlements.all {
-                print("  - \(key): active=\(entitlement.isActive)")
-            }
-            
             self.isSubscribed = customerInfo.entitlements[self.entitlementID]?.isActive == true
-            print("🔄 Subscription status updated: \(self.isSubscribed)")
-            print("🔄 Looking for entitlement: \(self.entitlementID)")
         }
     }
 }
